@@ -12,6 +12,7 @@ import org.springframework.stereotype.Service;
 
 import java.time.Duration;
 import java.util.List;
+import com.xujinzhou.blogbackend.dto.CachedArticle;
 
 @Service
 public class ArticleService {
@@ -24,6 +25,21 @@ public class ArticleService {
     /** 缓存有效期：10 分钟（TTL 是缓存一致性的最后一道兜底） */
     private static final Duration ARTICLE_LIST_TTL = Duration.ofMinutes(10);
 
+    /** 单篇文章缓存 key 前缀（拼接文章 id，如 blog:article:detail:v1:1） */
+    private static final String ARTICLE_DETAIL_PREFIX = "blog:article:detail:v1:";
+
+    /** 单篇文章缓存有效期：10 分钟 */
+    private static final Duration ARTICLE_DETAIL_TTL = Duration.ofMinutes(10);
+
+    /**
+     * "文章不存在"这个事实的缓存有效期：60 秒
+     *
+     * 为什么比正常数据短？
+     *   万一这篇文章后来被创建了，缓存空值不能长期拦住它。
+     *   所以空值的 TTL 要短，60 秒足够挡住短时间内的重复攻击。
+     */
+    private static final Duration ARTICLE_NULL_TTL = Duration.ofSeconds(60);
+
     private final ArticleMapper articleMapper;
     private final RedisTemplate<String, Object> redisTemplate;
 
@@ -34,10 +50,67 @@ public class ArticleService {
 
     // ==================== 读操作 ====================
 
+    /**
+     * 按 id 查询文章 —— 带缓存 + 防缓存穿透
+     *
+     * 执行流程：
+     *   ① 查 Redis
+     *        命中"壳"且壳里有文章 → 直接返回（毫秒级）
+     *        命中"壳"但壳里是 null → 说明之前查过、数据库确实没有 → 直接抛 404，【不查库】
+     *        未命中 → ②查 MySQL
+     *   ② MySQL 查到 → 写缓存（10 分钟）→ 返回
+     *      MySQL 没查到 → 写【空值缓存】（60 秒）→ 抛 404
+     *
+     * 关于"防穿透"：
+     *   恶意请求一直查不存在的 id（如 999999），如果不缓存空值，
+     *   每次都会穿透缓存打到数据库。缓存空值后，60 秒内的重复请求全部被挡住。
+     */
     public Article findById(Long id) {
-        Article article = articleMapper.selectById(id);   // BaseMapper自带的方法，按主键查询
+        String key = ARTICLE_DETAIL_PREFIX + id;
+
+        // ① 查缓存
+        try {
+            Object cached = redisTemplate.opsForValue().get(key);
+            if (cached instanceof CachedArticle cachedArticle) {
+                Article article = cachedArticle.getArticle();
+                if (article == null) {
+                    // 命中空值缓存：数据库里确实没有这篇文章，直接抛异常，不再查库
+                    log.info("[缓存命中-空值] key={}（防穿透生效，未查库）", key);
+                    throw new ArticleNotFoundException(id);
+                }
+                log.info("[缓存命中] key={} id={}", key, id);
+                return article;
+            }
+            log.info("[缓存未命中] key={}", key);
+        } catch (ArticleNotFoundException e) {
+            // 这是业务异常，必须原样抛出，不能被下面的 catch 吞掉！
+            // （否则"文章不存在"会变成"降级查库"，逻辑就乱了）
+            throw e;
+        } catch (Exception e) {
+            // Redis 读失败 → 降级：当作未命中，继续查库，保证接口可用
+            log.warn("[缓存读取失败，降级查库] key={}，原因：{}", key, e.getMessage());
+        }
+
+        // ② 查数据库
+        Article article = articleMapper.selectById(id);
+
         if (article == null) {
+            // ③-a 数据库也没有 → 缓存"不存在"这个事实（短 TTL），防止反复穿透
+            try {
+                redisTemplate.opsForValue().set(key, new CachedArticle(null), ARTICLE_NULL_TTL);
+                log.info("[写入空值缓存] key={} TTL={}秒（防穿透）", key, ARTICLE_NULL_TTL.toSeconds());
+            } catch (Exception e) {
+                log.warn("[空值缓存写入失败] key={}，原因：{}", key, e.getMessage());
+            }
             throw new ArticleNotFoundException(id);
+        }
+
+        // ③-b 查到数据 → 写缓存
+        try {
+            redisTemplate.opsForValue().set(key, new CachedArticle(article), ARTICLE_DETAIL_TTL);
+            log.info("[写入缓存] key={} id={}", key, id);
+        } catch (Exception e) {
+            log.warn("[缓存写入失败] key={}，原因：{}", key, e.getMessage());
         }
         return article;
     }
