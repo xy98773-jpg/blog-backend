@@ -17,15 +17,21 @@ public class RedisConfig {
 
     /**
      * 自定义 RedisTemplate：key 用字符串，value 用 JSON
-     * 这样 redis-cli 里能直接看懂，别的语言写的服务也能读；
-     * 同时也让容器里存在 RedisTemplate<String, Object> 这个 Bean（默认自动配置是 <Object, Object>）
-     *
-     * 注意两处和旧教程不一样的地方：
-     * 1. 用 GenericJacksonJsonRedisSerializer，而不是 GenericJackson2JsonRedisSerializer
-     *    —— 后者自 Spring Data Redis 4.0 起已弃用并标记移除
-     *    （Spring Boot 4 把 Jackson 升到 3.x，包名 com.fasterxml.jackson → tools.jackson）
-     * 2. 新类没有无参构造，必须用 builder() 创建；
-     *    enableUnsafeDefaultTyping() 开启类型信息，等价于旧类自动写入 @class 的行为
+
+     * 让 redis-cli 里能直接看懂、别的语言也能读；
+     * 同时让容器里存在 RedisTemplate<String, Object> 这个 Bean
+     * （Spring Boot 默认自动配置的是 RedisTemplate<Object, Object>，类型对不上）
+
+     * 【和旧写法的两处关键差异】
+     * 1. 类名去掉了 "2"：GenericJacksonJsonRedisSerializer（新）
+     *    旧的是 GenericJackson2JsonRedisSerializer —— 自 Spring Data Redis 4.0 起
+     *    已弃用并标记移除。
+     *    背景：Spring Boot 4 把 Jackson 从 2.x 升到 3.x（包名 com.fasterxml.jackson
+     *         → tools.jackson），序列化器跟着换代。
+
+     * 2. 新类【没有无参构造】，必须用 builder() 创建；
+     *    enableUnsafeDefaultTyping() 开启类型信息（写入 @class 字段），
+     *    等价于旧类自动开启 default typing 的行为。
      */
     @Bean
     public RedisTemplate<String, Object> redisTemplate(RedisConnectionFactory factory) {
@@ -47,8 +53,16 @@ public class RedisConfig {
     }
 
     /**
-     * 缓存管理器：让 @Cacheable / @CacheEvict 这类缓存注解
-     * 也用 JSON 序列化（不配这个的话，注解缓存写进去还是乱码）
+     * 缓存管理器：让 @Cacheable / @CacheEvict 这类【缓存注解】也用 JSON 序列化
+
+     * 为什么需要单独配它？（高频坑）
+     *   Spring 有两套用 Redis 的路子，序列化由【不同对象】决定：
+     *     ① 直接用 RedisTemplate       → 由 RedisTemplate 的序列化器决定
+     *     ② 用 @Cacheable 等注解       → 由 RedisCacheManager 决定，和 RedisTemplate 无关！
+     *   只配了 ①、忘了配 ②，用注解缓存时写进去的还是乱码。
+     
+     * 本项目当前是手动用 RedisTemplate 读写（没用注解），所以这个 Bean 暂时用不到；
+     * 但先配上，等以后改用 @Cacheable 时就不会踩坑。
      */
     @Bean
     public RedisCacheManager cacheManager(RedisConnectionFactory factory) {
