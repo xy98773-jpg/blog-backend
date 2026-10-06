@@ -109,6 +109,46 @@ public class ArticleService {
     }
 
     /**
+     * 新增文章
+     *
+     * 关键设计：【先插入数据库，再删除缓存】（和 update 同一个顺序，理由见 evictArticleListCache 注释）
+     *
+     * 为什么返回 Article 而不返回 void？
+     *   前端需要拿到【数据库生成的自增 id】，才能跳转到新文章的详情页。
+     *
+     * ⚠️ 注意：必须先把 id 置空！
+     *   如果请求体里带了 id（如 {"id":999,"title":"..."}），
+     *   不置空的话 MyBatis-Plus 会按这个 id 插入，可能覆盖已有数据或报主键冲突。
+     *   id 应该由数据库自增生成，不接受客户端指定。
+     */
+    public Article create(Article article) {
+        article.setId(null);                  // ① 强制让数据库生成自增 id，防止客户端指定
+        articleMapper.insert(article);        // ② 插入数据库（MyBatis-Plus 会把生成的 id 回填到 article）
+        evictArticleListCache("新增文章");     // ③ 再让缓存失效
+        return article;                       // 返回带 id 的完整对象
+    }
+    /**
+     * 删除文章
+     *
+     * 关键设计：【先删除数据库，再删除缓存】（和 update/create 同一个顺序）
+     *
+     * 边界处理：文章不存在时抛异常，不执行删除
+     *
+     * 为什么返回被删除的对象？
+     *   前端/调用方通常需要知道"删掉了什么"（比如显示提示"已删除《xxx》"），
+     *   而且先查出来再删，顺便起到"校验存在性"的作用。
+     */
+    public Article delete(Long id) {
+        Article existing = articleMapper.selectById(id);
+        if (existing == null) {
+            throw new ArticleNotFoundException(id);
+        }
+        articleMapper.deleteById(id);         // ① 先删数据库
+        evictArticleListCache("删除文章");     // ② 再让缓存失效
+        return existing;                      // 返回被删掉的那一篇（含标题，方便前端提示）
+    }
+
+    /**
      * 让文章列表缓存失效（统一走这里，避免每个写方法各写一遍）
      *
      * 【为什么必须"先库后缓存"】

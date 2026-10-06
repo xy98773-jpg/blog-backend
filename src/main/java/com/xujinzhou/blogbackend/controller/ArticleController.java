@@ -8,6 +8,8 @@ import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.RequestBody;
 import org.springframework.web.bind.annotation.RestController;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.DeleteMapping;
 
 @RestController
 public class ArticleController {
@@ -39,5 +41,27 @@ public class ArticleController {
     @PutMapping("/articles/{id}")
     public ApiResponse<Article> updateArticle(@PathVariable Long id, @RequestBody Article article) {
         return ApiResponse.success(articleService.update(id, article));
+    }
+
+    /**
+     * 新增文章
+     * POST /articles
+     * Body 示例：{"title":"标题","summary":"摘要","content":"正文"}
+     * 注意：不要带 id，id 由数据库自增生成
+     * 成功后会自动清除列表缓存
+     */
+    @PostMapping("/articles")
+    public ApiResponse<Article> createArticle(@RequestBody Article article) {
+        return ApiResponse.success(articleService.create(article));
+    }
+
+    /**
+     * 删除文章
+     * DELETE /articles/{id}
+     * 成功后会自动清除列表缓存
+     */
+    @DeleteMapping("/articles/{id}")
+    public ApiResponse<Article> deleteArticle(@PathVariable Long id) {
+        return ApiResponse.success(articleService.delete(id));
     }
 }

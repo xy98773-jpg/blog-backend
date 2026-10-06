@@ -57,6 +57,8 @@ public class SecurityConfig {
                         // Spring Security 的匹配是"从上往下，命中即停"，
                         // 顺序写反会导致 PUT/DELETE /articles/{id} 被匿名放行 —— 真实的安全漏洞。
                         .requestMatchers(HttpMethod.PUT, "/articles/**").authenticated()
+                        .requestMatchers(HttpMethod.POST, "/articles").authenticated()
+                        .requestMatchers(HttpMethod.DELETE, "/articles/**").authenticated()
                         // ===== 文章【读接口】：首页、详情页任何未登录用户都要看，放行 =====
                         .requestMatchers("/articles", "/articles/**").permitAll()
                         // ↓↓↓ 临时放行：Redis 联调用的测试接口，验证完会连同 RedisTestController 一起删掉
