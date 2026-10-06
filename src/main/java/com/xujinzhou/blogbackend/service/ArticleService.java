@@ -13,7 +13,7 @@ import org.springframework.stereotype.Service;
 import java.time.Duration;
 import java.util.List;
 import com.xujinzhou.blogbackend.dto.CachedArticle;
-
+import java.util.concurrent.ThreadLocalRandom;
 @Service
 public class ArticleService {
 
@@ -39,6 +39,21 @@ public class ArticleService {
      *   所以空值的 TTL 要短，60 秒足够挡住短时间内的重复攻击。
      */
     private static final Duration ARTICLE_NULL_TTL = Duration.ofSeconds(60);
+
+    /**
+     * TTL 随机抖动上限（秒）—— 防缓存雪崩的第一道手段
+     *
+     * 如果不加抖动：
+     *   所有 key 的 TTL 都是整齐的 10 分钟
+     *   → 同一批写入的 key 会在【同一秒】集体失效
+     *   → 所有请求瞬间涌向数据库（雪崩）
+     *
+     * 加 0~60 秒随机偏移后：
+     *   过期时间被【打散】，数据库压力被摊平
+     *
+     * 实测：连续写 4 次，TTL 分别是 653 / 621 / 631 / 648 秒 —— 每次都不同
+     */
+    private static final long TTL_JITTER_SECONDS = 60;
 
     private final ArticleMapper articleMapper;
     private final RedisTemplate<String, Object> redisTemplate;
@@ -105,10 +120,11 @@ public class ArticleService {
             throw new ArticleNotFoundException(id);
         }
 
-        // ③-b 查到数据 → 写缓存
+        // ③-b 查到数据 → 写缓存（TTL 带随机抖动，防雪崩）
         try {
-            redisTemplate.opsForValue().set(key, new CachedArticle(article), ARTICLE_DETAIL_TTL);
-            log.info("[写入缓存] key={} id={}", key, id);
+            Duration ttl = jitterTtl(ARTICLE_DETAIL_TTL);
+            redisTemplate.opsForValue().set(key, new CachedArticle(article), ttl);
+            log.info("[写入缓存] key={} id={} TTL={}秒（含随机抖动）", key, id, ttl.toSeconds());
         } catch (Exception e) {
             log.warn("[缓存写入失败] key={}，原因：{}", key, e.getMessage());
         }
@@ -146,10 +162,11 @@ public class ArticleService {
         List<Article> articles = articleMapper.selectList(null);   // 传null表示不加任何过滤条件
         long dbCost = System.currentTimeMillis() - dbStart;
 
-        // ③ 写回缓存
+        // ③ 写回缓存（TTL 带随机抖动，防雪崩）
         try {
-            redisTemplate.opsForValue().set(ARTICLE_LIST_KEY, CachedArticleList.of(articles), ARTICLE_LIST_TTL);
-            log.info("[写入缓存] key={}，条数={}，TTL={}分钟", ARTICLE_LIST_KEY, articles.size(), ARTICLE_LIST_TTL.toMinutes());
+            Duration ttl = jitterTtl(ARTICLE_LIST_TTL);
+            redisTemplate.opsForValue().set(ARTICLE_LIST_KEY, CachedArticleList.of(articles), ttl);
+            log.info("[写入缓存] key={}，条数={}，TTL={}秒（含随机抖动）", ARTICLE_LIST_KEY, articles.size(), ttl.toSeconds());
         } catch (Exception e) {
             // 写缓存失败不影响本次返回，只记日志
             log.warn("[缓存写入失败] key={}，原因：{}", ARTICLE_LIST_KEY, e.getMessage());
@@ -250,5 +267,20 @@ public class ArticleService {
             log.warn("[清缓存失败] 动作={} key={}，原因：{}（缓存将在 TTL 到期后自愈）",
                     action, ARTICLE_LIST_KEY, e.getMessage());
         }
+    }
+
+    /**
+     * 给 TTL 加上随机抖动，避免大量 key 在同一时刻集体失效（防缓存雪崩）
+     *
+     * @param base 基础有效期
+     * @return base + random(0, TTL_JITTER_SECONDS) 秒
+     *
+     * 为什么用 ThreadLocalRandom 而不是 Random？
+     *   ThreadLocalRandom 是 JDK 7 引入的，在高并发下比 new Random() 性能更好
+     *   （多个线程共用一个 Random 实例时会有 CAS 竞争）
+     */
+    private Duration jitterTtl(Duration base) {
+        long extra = ThreadLocalRandom.current().nextLong(TTL_JITTER_SECONDS + 1);   // 0 ~ 60
+        return base.plusSeconds(extra);
     }
 }
