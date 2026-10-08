@@ -58,6 +58,25 @@
             <version>3.5.17</version>
         </dependency>
 
+        <!--
+          分页插件所在的模块（MyBatis-Plus 3.5.9+ 必须单独引入）
+
+          为什么需要它？
+            3.5.9 起，PaginationInnerInterceptor 从 mybatis-plus-extension
+            拆到了 mybatis-plus-jsqlparser 模块。原因是分页需要解析 SQL，
+            依赖体量较大的 JSqlParser，拆开可以让不用分页的人不必引入它。
+
+          不加这个依赖的症状：
+            编译报错「找不到符号 PaginationInnerInterceptor」
+            或者（如果只用了 Page 没配拦截器）分页不生效，SQL 里没有 LIMIT，
+            变成查出全部数据再在内存里截取。
+        -->
+        <dependency>
+            <groupId>com.baomidou</groupId>
+            <artifactId>mybatis-plus-jsqlparser</artifactId>
+            <version>3.5.17</version>
+        </dependency>
+
         <!-- MySQL 驱动，注意是新版的 artifactId -->
         <dependency>
             <groupId>com.mysql</groupId>
