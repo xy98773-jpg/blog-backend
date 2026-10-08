@@ -2,6 +2,7 @@ package com.xujinzhou.blogbackend.security;
 
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
+import org.springframework.http.HttpMethod;
 import org.springframework.security.config.annotation.web.builders.HttpSecurity;
 import org.springframework.security.config.http.SessionCreationPolicy;
 import org.springframework.security.crypto.bcrypt.BCryptPasswordEncoder;
@@ -11,7 +12,6 @@ import org.springframework.security.web.authentication.UsernamePasswordAuthentic
 import org.springframework.web.cors.CorsConfiguration;
 import org.springframework.web.cors.CorsConfigurationSource;
 import org.springframework.web.cors.UrlBasedCorsConfigurationSource;
-import org.springframework.http.HttpMethod;
 
 import java.util.List;
 
@@ -55,15 +55,13 @@ public class SecurityConfig {
                         // ===== 文章【写接口】：必须带 JWT =====
                         // 注意：这三条必须写在下面 /articles/** 放行规则【之前】！
                         // Spring Security 的匹配是"从上往下，命中即停"，
-                        // 顺序写反会导致 PUT/DELETE /articles/{id} 被匿名放行 —— 真实的安全漏洞。
+                        // 顺序写反会导致写接口被匿名放行 —— 真实的安全漏洞。
                         .requestMatchers(HttpMethod.PUT, "/articles/**").authenticated()
                         .requestMatchers(HttpMethod.POST, "/articles").authenticated()
                         .requestMatchers(HttpMethod.DELETE, "/articles/**").authenticated()
                         // ===== 文章【读接口】：首页、详情页任何未登录用户都要看，放行 =====
                         .requestMatchers("/articles", "/articles/**").permitAll()
-                        // ↓↓↓ 临时放行：Redis 联调用的测试接口，验证完会连同 RedisTestController 一起删掉
-                        .requestMatchers("/redis-test/**").permitAll()
-                        // ↑↑↑ 临时放行结束
+                        // 其余所有接口都需要认证（没有例外，临时测试接口已清理）
                         .anyRequest().authenticated()
                 )
                 .addFilterBefore(jwtAuthenticationFilter, UsernamePasswordAuthenticationFilter.class);
