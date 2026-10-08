@@ -37,3 +37,6 @@ build/
 .env.local
 .env.*.local
 !.env.example
+
+### 内部协作约定（不对外公开）
+AGENTS.md
