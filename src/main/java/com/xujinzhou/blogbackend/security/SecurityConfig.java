@@ -52,12 +52,13 @@ public class SecurityConfig {
                 .authorizeHttpRequests(auth -> auth
                         // 登录/注册：未登录时前端就要调，必须放行
                         .requestMatchers("/auth/**").permitAll()
-                        // ===== 文章【写接口】：必须带 JWT =====
-                        // 注意：这三条必须写在下面 /articles/** 放行规则【之前】！
+                        // ===== 文章/评论【写接口】：必须带 JWT =====
+                        // 包括：PUT/DELETE 文章、POST 新增文章、POST 发表评论
+                        // 注意：这几条必须写在下面 /articles/** 放行规则【之前】！
                         // Spring Security 的匹配是"从上往下，命中即停"，
                         // 顺序写反会导致写接口被匿名放行 —— 真实的安全漏洞。
                         .requestMatchers(HttpMethod.PUT, "/articles/**").authenticated()
-                        .requestMatchers(HttpMethod.POST, "/articles").authenticated()
+                        .requestMatchers(HttpMethod.POST, "/articles", "/articles/**").authenticated()
                         .requestMatchers(HttpMethod.DELETE, "/articles/**").authenticated()
                         // ===== 文章【读接口】：首页、详情页任何未登录用户都要看，放行 =====
                         .requestMatchers("/articles", "/articles/**").permitAll()
