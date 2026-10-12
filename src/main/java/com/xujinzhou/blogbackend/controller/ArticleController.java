@@ -80,4 +80,24 @@ public class ArticleController {
     public ApiResponse<Article> deleteArticle(@PathVariable Long id) {
         return ApiResponse.success(articleService.delete(id));
     }
+
+    /**
+     * 恢复某篇文章被归档的评论（误删恢复用）
+     * POST /articles/{id}/restore-comments
+     *
+     * 为什么用 POST 而不是 PUT？
+     *   PUT 的语义是"整体替换资源"，而这只是一个【动作】。
+     *   REST 里对动作通常用 POST + 动词短语（Google API 规范写作 :restore，用斜杠也常见）。
+     *
+     * 幂等性：重复调用不会出问题 —— 归档表空了以后只会返回 0。
+     *
+     * ⚠️ 权限：目前只要求登录（SecurityConfig 里 POST /articles/** → authenticated）。
+     *   这是安全债 —— 管理类操作本应只允许管理员，等引入角色体系后要收紧。
+     *
+     * @return 恢复了多少条评论
+     */
+    @PostMapping("/articles/{id}/restore-comments")
+    public ApiResponse<Integer> restoreComments(@PathVariable Long id) {
+        return ApiResponse.success(articleService.restoreComments(id));
+    }
 }

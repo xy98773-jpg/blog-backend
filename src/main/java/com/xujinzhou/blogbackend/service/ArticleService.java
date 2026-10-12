@@ -1,22 +1,25 @@
 package com.xujinzhou.blogbackend.service;
 
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
 import com.xujinzhou.blogbackend.common.ApiResponse;
 import com.xujinzhou.blogbackend.dto.CachedArticle;
 import com.xujinzhou.blogbackend.dto.PageResult;
 import com.xujinzhou.blogbackend.entity.Article;
+import com.xujinzhou.blogbackend.entity.Comment;
 import com.xujinzhou.blogbackend.exception.ArticleNotFoundException;
 import com.xujinzhou.blogbackend.mapper.ArticleMapper;
-import com.xujinzhou.blogbackend.mapper.CommentMapper;                  // ★ 新增
+import com.xujinzhou.blogbackend.mapper.CommentMapper;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
+import org.springframework.transaction.support.TransactionTemplate;
 
 import java.time.Duration;
-import java.util.HashMap;        // ★ 新增
-import java.util.List;           // ★ 新增
-import java.util.Map;            // ★ 新增
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ThreadLocalRandom;
 
 @Service
@@ -97,14 +100,19 @@ public class ArticleService {
 
     private final ArticleMapper articleMapper;
     private final RedisTemplate<String, Object> redisTemplate;
-    private final CommentMapper commentMapper;      // ★ 新增字段
+    private final CommentMapper commentMapper;
+
+    /** 显式事务模板：删文章时要让"归档 + 删评论 + 删文章"三步同生共死 */
+    private final TransactionTemplate transactionTemplate;
 
     public ArticleService(ArticleMapper articleMapper,
                           RedisTemplate<String, Object> redisTemplate,
-                          CommentMapper commentMapper) {        // ★ 新增参数
+                          CommentMapper commentMapper,
+                          TransactionTemplate transactionTemplate) {
         this.articleMapper = articleMapper;
         this.redisTemplate = redisTemplate;
-        this.commentMapper = commentMapper;             // ★ 新增赋值
+        this.commentMapper = commentMapper;
+        this.transactionTemplate = transactionTemplate;
     }
 
     // ==================== 读操作 ====================
@@ -323,7 +331,23 @@ public class ArticleService {
     }
 
     /**
-     * 删除文章
+     * 删除文章 —— 连带处理该文章下的所有评论
+     *
+     * 执行顺序（三步，顺序不能变）：
+     *   ① 归档评论    把该文章的评论整批搬进 comment_archive（此刻 comment 表才有数据）
+     *   ② 物理删评论   comment 表物理行清空 → 外键 RESTRICT 放行
+     *   ③ 物理删文章   此刻才删得掉
+     *
+     * ★ 为什么这三步必须包在【同一个事务】里？
+     *   如果各管各的，②成功、③失败，就会留下"评论没了但文章还在"的半成品 ——
+     *   用户看到一篇光秃秃、评论全部蒸发的文章。银行转账转一半，不能发生在我们这。
+     *
+     * ★ 为什么用 TransactionTemplate 而不是 @Transactional 注解？
+     *   ① 事务边界肉眼可见（就在这个代码块里），注解是靠代理（Proxy）隐式生效的
+     *   ② execute() 返回时事务【已提交】→ 后面清缓存的时序天然正确，
+     *      不存在"事务没提交就清缓存、被并发读回填旧值"的脏数据窗口
+     *   ③ 主动调用模板，不依赖代理 → 自调用失效那类问题从根上不存在
+     *   ④ 不用新建事件类、不用引入事件机制
      *
      * 边界处理：文章不存在时抛异常，不执行删除（同样要清一次缓存，理由同 update）
      */
@@ -333,10 +357,67 @@ public class ArticleService {
             evictArticleCache("删除失败-文章不存在", id);
             throw new ArticleNotFoundException(id);
         }
-        articleMapper.deleteById(id);         // ① 先删数据库
-        evictArticleCache("删除文章", id);     // ② 再让缓存失效
-        return existing;                      // 返回被删掉的那一篇（含标题，方便前端提示）
+
+        // ★★ 三步同生共死：任何一步抛异常，整个事务回滚
+        Integer archivedCount = transactionTemplate.execute(status -> {
+            // ① 先归档（此刻 comment 表还有数据 —— 这是唯一能取到评论的时刻）
+            int archived = commentMapper.archiveByArticleId(id, existing.getTitle());
+            // ② 再物理删评论（BaseMapper 自带的方法，不用另写 Mapper）
+            commentMapper.delete(new QueryWrapper<Comment>().eq("article_id", id));
+            // ③ 最后删文章
+            articleMapper.deleteById(id);
+            return archived;
+        });
+
+        log.info("[删除文章] articleId={} 标题={} 归档评论 {} 条", id, existing.getTitle(), archivedCount);
+
+        // 事务已提交 —— 此刻清缓存才是安全的
+        evictArticleCache("删除文章", id);
+        return existing;
     }
+
+    /**
+     * 恢复某篇文章被归档的评论（误删恢复用）—— delete() 的逆操作
+     *
+     * 执行顺序（和 delete() 正好相反，顺序同样不能变）：
+     *   ① 校验文章存在  评论不能挂在不存在的文章上（否则外键报 1451，那是 500 不是 404）
+     *   ② 搬回评论      comment_archive → comment（此时文章必须已存在）
+     *   ③ 清空归档行    让"恢复"成为真正的【搬回】，否则下次删除会撞主键
+     *
+     * ★ 为什么②③必须包在【同一个事务】里？
+     *   只搬回、没清归档 → 下次删这篇文章时归档 INSERT 撞主键 → 1062 → 整篇删不掉
+     *   只清归档、没搬回 → 评论彻底消失，"恢复"变成了另一次删除
+     *   → 这两步必须同生共死，和 delete() 的三步是同一个道理
+     *
+     * ★ 为什么用 TransactionTemplate：理由同 delete()（事务边界可见 + 提交后清缓存时序正确）
+     *
+     * ⚠️ 安全债（当前无法解决，先记在这里）：
+     *   这是"复活已删除数据"的管理操作，但项目【还没有角色系统】
+     *   （user 表没有 role 字段），SecurityConfig 目前只能做到 authenticated（登录即可）。
+     *   → 将来引入角色/管理员体系后，这里必须补管理员权限校验。
+     *
+     * @return 恢复了多少条；归档表里没有该文章的记录时返回 0 且不报错（幂等，可重复调用）
+     */
+    public int restoreComments(Long articleId) {
+        // ① 文章不存在 → 404（比让外键抛 1451 再被兜底成 500 友好得多）
+        if (articleMapper.selectById(articleId) == null) {
+            throw new ArticleNotFoundException(articleId);
+        }
+
+        // ②③ 同生共死：搬回 + 清空原处
+        Integer restoredCount = transactionTemplate.execute(status -> {
+            int restored = commentMapper.restoreByArticleId(articleId);
+            commentMapper.deleteArchiveByArticleId(articleId);
+            return restored;
+        });
+
+        log.info("[恢复评论] articleId={} 恢复 {} 条（归档表对应记录已清空）", articleId, restoredCount);
+
+        // 事务已提交 —— 评论数变了，列表缓存必须失效
+        evictArticleCache("恢复评论", articleId);
+        return restoredCount;
+    }
+
 
     // ==================== 私有工具方法 ====================
 

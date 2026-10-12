@@ -68,14 +68,6 @@ public class CommentService {
         return PageResult.of(mpResult);
     }
 
-    /** 统计某篇文章的【未删除】评论数（给文章列表用） */
-    public long countByArticle(Long articleId) {
-        QueryWrapper<Comment> wrapper = new QueryWrapper<>();
-        wrapper.eq("article_id", articleId).eq("status", STATUS_NORMAL);
-        Long count = commentMapper.selectCount(wrapper);
-        return count == null ? 0L : count;
-    }
-
     // ==================== 写操作 ====================
 
     /**
