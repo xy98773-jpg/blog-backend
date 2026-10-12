@@ -7,12 +7,16 @@ import com.xujinzhou.blogbackend.dto.PageResult;
 import com.xujinzhou.blogbackend.entity.Article;
 import com.xujinzhou.blogbackend.exception.ArticleNotFoundException;
 import com.xujinzhou.blogbackend.mapper.ArticleMapper;
+import com.xujinzhou.blogbackend.mapper.CommentMapper;                  // ★ 新增
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.data.redis.core.RedisTemplate;
 import org.springframework.stereotype.Service;
 
 import java.time.Duration;
+import java.util.HashMap;        // ★ 新增
+import java.util.List;           // ★ 新增
+import java.util.Map;            // ★ 新增
 import java.util.concurrent.ThreadLocalRandom;
 
 @Service
@@ -93,10 +97,14 @@ public class ArticleService {
 
     private final ArticleMapper articleMapper;
     private final RedisTemplate<String, Object> redisTemplate;
+    private final CommentMapper commentMapper;      // ★ 新增字段
 
-    public ArticleService(ArticleMapper articleMapper, RedisTemplate<String, Object> redisTemplate) {
+    public ArticleService(ArticleMapper articleMapper,
+                          RedisTemplate<String, Object> redisTemplate,
+                          CommentMapper commentMapper) {        // ★ 新增参数
         this.articleMapper = articleMapper;
         this.redisTemplate = redisTemplate;
+        this.commentMapper = commentMapper;             // ★ 新增赋值
     }
 
     // ==================== 读操作 ====================
@@ -222,6 +230,40 @@ public class ArticleService {
         long dbCost = System.currentTimeMillis() - dbStart;
 
         PageResult<Article> pageResult = PageResult.of(mpResult);
+
+        // ★★★ 第 2 步：一次 GROUP BY 查完所有文章的评论数（解决 N+1）
+        // 3 篇文章：1 次查文章 + 1 次 GROUP BY = 3 条 SQL
+        // （第 1 步是 1 + N 条；size=50 时第 1 步 51 条，现在恒为 1 条聚合查询）
+        // ⚠️ 必须放在写缓存【之前】：缓存里存的就是 pageResult，
+        //    若先缓存再补评论数，缓存命中时 commentCount 会是 null
+        long countStart = System.currentTimeMillis();
+        List<Long> articleIds = pageResult.getList().stream()
+                .map(Article::getId)
+                .toList();
+
+        // 只有当页非空时才查（articleIds 为空会让 IN () 成为非法 SQL）
+        if (!articleIds.isEmpty()) {
+            List<Map<String, Object>> rows = commentMapper.countByArticleIds(articleIds);
+
+            // List<Map> → Map<articleId, count>，方便下面 O(1) 查找
+            Map<Long, Integer> countMap = new HashMap<>();
+            for (Map<String, Object> row : rows) {
+                // COUNT(*) 返回的是 Long，article_id 也是 Long，统一用 Number 兜住类型差异
+                Long aid = ((Number) row.get("articleId")).longValue();
+                Integer cnt = ((Number) row.get("cnt")).intValue();
+                countMap.put(aid, cnt);
+            }
+
+            for (Article article : pageResult.getList()) {
+                // ★ getOrDefault 是关键：没有评论的文章【不会出现在 GROUP BY 结果里】
+                //   （COUNT=0 的组不生成行），所以默认值必须是 0
+                article.setCommentCount(countMap.getOrDefault(article.getId(), 0));
+            }
+        }
+
+        long countCost = System.currentTimeMillis() - countStart;
+        log.info("[评论数-批量统计] 本页 {} 篇文章，额外 SQL 1 条，耗时 {}ms",
+                pageResult.getList().size(), countCost);
 
         // ⑤ 写回缓存（TTL 带随机抖动）
         try {
