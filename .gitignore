@@ -38,5 +38,8 @@ build/
 .env.*.local
 !.env.example
 
-### �ڲ�Э��Լ���������⹫����
+### 内部协作约定（不对外公开）
 AGENTS.md
+
+### Agent 运行时记忆目录（本地专用，绝不提交）
+.workbuddy/
