@@ -441,6 +441,27 @@ public class ArticleService {
     }
 
     /**
+     * 只让【文章列表】缓存失效（不动单篇详情缓存）
+     *
+     * 为什么要对外暴露：
+     *   列表里显示的"评论数"是文章列表缓存的一部分，
+     *   但发评论 / 删评论的写操作在 CommentService 里 —— 那边改了数据却没地方清缓存，
+     *   导致首页永远显示旧的评论数。
+     *   → 缓存失效的责任边界是【谁污染了这份数据，谁负责清理】。
+     *
+     * @param action 动作描述（只用于日志，方便排查是哪次写操作清的缓存）
+     */
+    public void evictArticleListCache(String action) {
+        try {
+            Long newVersion = redisTemplate.opsForValue().increment(ARTICLE_LIST_VERSION_KEY);
+            log.info("[清缓存-列表] 动作={} 版本号自增为={}（所有分页缓存 key 已失效）", action, newVersion);
+        } catch (Exception e) {
+            // 清缓存失败不能影响业务成功（数据已经写进数据库了），靠 TTL 到期自愈
+            log.warn("[清缓存-列表失败] 动作={}，原因：{}（缓存将在 TTL 到期后自愈）", action, e.getMessage());
+        }
+    }
+
+    /**
      * 让文章相关缓存失效
      *
      * 做了两件事：
@@ -468,13 +489,8 @@ public class ArticleService {
      */
     private void evictArticleCache(String action, Long articleId) {
         // ① 列表缓存：版本号 +1，所有分页 key 逻辑失效
-        try {
-            Long newVersion = redisTemplate.opsForValue().increment(ARTICLE_LIST_VERSION_KEY);
-            log.info("[清缓存-列表] 动作={} 版本号自增为={}（所有分页缓存 key 已失效）", action, newVersion);
-        } catch (Exception e) {
-            // 清缓存失败不能影响业务成功（数据已经写进数据库了），靠 TTL 到期自愈
-            log.warn("[清缓存-列表失败] 动作={}，原因：{}（缓存将在 TTL 到期后自愈）", action, e.getMessage());
-        }
+        //    （复用上面那个 public 方法 —— INCR 逻辑只留一处，避免两处各写一遍）
+        evictArticleListCache(action);
 
         // ② 详情缓存：直接删除该文章的 key
         if (articleId != null) {

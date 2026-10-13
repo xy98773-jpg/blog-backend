@@ -37,10 +37,19 @@ public class CommentService {
     private final ArticleMapper articleMapper;
     private final UserMapper userMapper;
 
-    public CommentService(CommentMapper commentMapper, ArticleMapper articleMapper, UserMapper userMapper) {
+    /**
+     * 只为了一件事：发 / 删评论后让【文章列表】缓存失效。
+     * 列表里显示的"评论数"是那份缓存的一部分，不清的话首页数字永远是旧的。
+     * （ArticleService 不依赖 CommentService，所以这里是单向依赖，不会循环依赖）
+     */
+    private final ArticleService articleService;
+
+    public CommentService(CommentMapper commentMapper, ArticleMapper articleMapper,
+                          UserMapper userMapper, ArticleService articleService) {
         this.commentMapper = commentMapper;
         this.articleMapper = articleMapper;
         this.userMapper = userMapper;
+        this.articleService = articleService;
     }
 
     // ==================== 读操作 ====================
@@ -97,6 +106,9 @@ public class CommentService {
 
         commentMapper.insert(comment);
 
+        // ★ 列表里的"评论数"变了 —— 必须让文章列表缓存失效，否则首页永远显示旧数字
+        articleService.evictArticleListCache("发表评论 articleId=" + articleId);
+
         log.info("[发表评论] commentId={} articleId={} userId={} contentLength={}",
                 comment.getId(), articleId, userId, content.length());
 
@@ -145,6 +157,9 @@ public class CommentService {
 
         log.info("[删除评论-软删] commentId={} 操作人={}(userId={}) 影响行数={}（数据仍在表中，status 已置为 {}）",
                 commentId, username, currentUserId, affected, STATUS_DELETED);
+
+        // 软删同样是"评论数 -1"，列表缓存一样要失效
+        articleService.evictArticleListCache("删除评论 articleId=" + existing.getArticleId());
 
         existing.setStatus(STATUS_DELETED);
         return existing;
