@@ -3,6 +3,7 @@ package com.xujinzhou.blogbackend.handler;
 import com.xujinzhou.blogbackend.common.ApiResponse;
 import com.xujinzhou.blogbackend.exception.ApiException;
 import org.springframework.http.HttpStatus;
+import org.springframework.http.converter.HttpMessageNotReadableException;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.HttpRequestMethodNotSupportedException;
 import org.springframework.web.bind.annotation.ExceptionHandler;
@@ -76,6 +77,34 @@ public class GlobalExceptionHandler {
         return ApiResponse.error(400,
                 "参数 " + e.getName() + " 类型错误，期望 " + typeName + "，实际值: " + e.getValue());
     }
+
+    /**
+     * 请求体（body）不是合法 JSON，或 JSON 里的字段类型对不上
+     *   例：{"username":zhangsan}   ← 属性名没加双引号
+     *       {"age":"abc"}           ← 期望数字，收到字符串
+     *       请求体为空              ← 一个字节都没有
+     *
+     * ★ 这属于【客户端传错了】，必须是 400，不能是 500。
+     *   不加这个方法 → 被下面的 Exception 兜底 → 返回 500，
+     *   前端会以为"服务器崩了"，实际只是请求体写错了。
+     *   （学员实测撞过一次：PowerShell 把 JSON 的双引号吃掉，后端就返回了 500）
+     *
+     * 为什么不跟上面的 MethodArgumentTypeMismatchException 合并？
+     *   那个管的是【URL 路径变量 / 查询参数】（/articles/abc、?page=xyz），
+     *   这个管的是【请求体 body】——两者来源不同、异常类型也不同，得分开。
+     *
+     * 关于 e.getMessage()：
+     *   Jackson 的原始消息很长（还带 "at [Source: REDACTED...]" 之类），
+     *   所以只取【第一行】——那行才是真正有用的原因描述。
+     */
+    @ExceptionHandler(HttpMessageNotReadableException.class)
+    @ResponseStatus(HttpStatus.BAD_REQUEST)
+    public ApiResponse<Void> handleNotReadable(HttpMessageNotReadableException e) {
+        String raw = e.getMessage();
+        String reason = (raw == null || raw.isEmpty()) ? "未知原因" : raw.split("\n")[0];
+        return ApiResponse.error(400, "请求体格式错误，请检查 JSON：" + reason);
+    }
+
     /**
      * 兜底：捕获所有没被上面处理到的异常，防止直接把堆栈信息暴露给前端
      * 这里状态码是固定值，可以继续用 @ResponseStatus
