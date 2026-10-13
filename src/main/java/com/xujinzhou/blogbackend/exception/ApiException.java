@@ -23,6 +23,9 @@ public class ApiException extends RuntimeException {
     public static final int FORBIDDEN = 403;
     public static final int NOT_FOUND = 404;
 
+    /** 409 Conflict：请求与服务器当前状态冲突（典型场景：用户名 / 邮箱重复） */
+    public static final int CONFLICT = 409;
+
     private final int status;
 
     public ApiException(int status, String message) {

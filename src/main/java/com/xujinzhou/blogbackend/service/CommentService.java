@@ -3,6 +3,11 @@ package com.xujinzhou.blogbackend.service;
 import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.baomidou.mybatisplus.core.conditions.update.UpdateWrapper;
 import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import java.util.List;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
+import java.util.stream.Collectors;
 import com.xujinzhou.blogbackend.dto.PageResult;
 import com.xujinzhou.blogbackend.entity.Comment;
 import com.xujinzhou.blogbackend.entity.User;
@@ -71,6 +76,9 @@ public class CommentService {
         Page<Comment> mpPage = new Page<>(safePage, safeSize);
         Page<Comment> mpResult = commentMapper.selectPage(mpPage, wrapper);
 
+        // ★ 评论里只有 userId，这里批量查一次 user 表把作者名补上（只多 1 条 SQL）
+        fillUsernames(mpResult.getRecords());
+
         log.info("[查评论列表] articleId={} page={} size={} 本页条数={} 总数={}",
                 articleId, safePage, safeSize, mpResult.getRecords().size(), mpResult.getTotal());
 
@@ -101,6 +109,7 @@ public class CommentService {
         Comment comment = new Comment();
         comment.setArticleId(articleId);
         comment.setUserId(userId);
+        comment.setUsername(username);   // 方法参数里就有，不用再查库
         comment.setContent(content);
         comment.setStatus(STATUS_NORMAL);
 
@@ -162,6 +171,7 @@ public class CommentService {
         articleService.evictArticleListCache("删除评论 articleId=" + existing.getArticleId());
 
         existing.setStatus(STATUS_DELETED);
+        existing.setUsername(username);   // 删的是自己的评论，作者名就是当前登录用户
         return existing;
     }
 
@@ -177,6 +187,50 @@ public class CommentService {
      *   → Java 层先拦，才能给出【正确的状态码 + 可读的消息】
      *   → 数据库外键是最后一道保险，永远不要依赖数据库报错做业务判断
      */
+    /**
+     * 给一批评论补上作者用户名 —— 【批量查一次】，不是每条评论查一次
+     *
+     * 反面教材（N+1）：
+     *   for (Comment c : comments) {
+     *       c.setUsername(userMapper.selectById(c.getUserId()).getUsername());
+     *   }
+     *   → 一页 10 条评论就是 10 条 SQL，条数随分页大小线性增长
+     *
+     * 正确做法：先收集所有 userId，再用 IN 查【一次】
+     *   → 无论一页多少条，永远只多 1 条 SQL（和第十站 GROUP BY 的思路完全一样）
+     *
+     * 查不到的用户（比如账号已注销）兜底成"未知用户"，
+     * 不留 null —— 否则前端显示空白，还得去猜是没查到还是字段丢了。
+     */
+    private void fillUsernames(List<Comment> comments) {
+        if (comments == null || comments.isEmpty()) {
+            return;
+        }
+
+        // ① 收集去重后的 userId（同一个作者可能在本页评论多次）
+        Set<Long> userIds = comments.stream()
+                .map(Comment::getUserId)
+                .filter(Objects::nonNull)
+                .collect(Collectors.toSet());
+        if (userIds.isEmpty()) {
+            return;
+        }
+
+        // ② 一次查回所有作者：SELECT id,username FROM user WHERE id IN (...)
+        QueryWrapper<User> wrapper = new QueryWrapper<>();
+        wrapper.in("id", userIds);
+        Map<Long, String> usernameMap = userMapper.selectList(wrapper).stream()
+                .collect(Collectors.toMap(User::getId, User::getUsername));
+
+        // ③ 回填（Map 查找是 O(1)，不是嵌套循环）
+        for (Comment c : comments) {
+            c.setUsername(usernameMap.getOrDefault(c.getUserId(), "未知用户"));
+        }
+
+        log.info("[填充评论作者] 本页评论数={} 涉及用户数={}（批量查询 1 次）",
+                comments.size(), userIds.size());
+    }
+
     private void requireArticleExists(Long articleId) {
         if (articleMapper.selectById(articleId) == null) {
             throw new ApiException(ApiException.NOT_FOUND, "文章不存在，ID: " + articleId);
